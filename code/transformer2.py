@@ -634,14 +634,9 @@ def update_stats(prev_data, prev_batch):
 def predict_local(filepath, prev_data, is_debug, batch_size):
     test_set = pd.read_parquet(PARQUETS_DIR + filepath,)
                                # columns=[KEY_FEATURE] + FEATURES + [TARGET])
-    print(test_set.head())
     if is_debug:
         test_set = test_set.iloc[-50_000:]
-    print(test_set.columns)
-    print(test_set)
-    return
-    test_set = test_set[test_set['content_type_id'] == 0]
-    test_dataset = RiiidTest(prev_data, test_set.values,
+    test_dataset = RiiidTest(prev_data, test_set,
                              SEQ_LEN, local=True)
     test_dataloader = \
         torch.utils.data.DataLoader(dataset=test_dataset,
