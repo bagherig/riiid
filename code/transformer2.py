@@ -65,8 +65,7 @@ SUBMISSION_COLUMNS = [
 
 def load_data(filename):
     return pd.read_parquet(PARQUETS_DIR + filename,
-                           columns=[KEY_FEATURE] + FEATURES + [
-                               TARGET])  # .iloc[-1_000_000:]
+                           columns=[KEY_FEATURE] + FEATURES + [TARGET])  # .iloc[-1_000_000:]
 
 
 def split_train_valid(dt, val_fraction):
@@ -386,7 +385,6 @@ def train_epoch(estimator, train_iterator, optim, sched, criterion,
             elif DTYPES[feat] is bool:
                 inputs[feat] = torch.Tensor(batch[i]).to(device).bool()
         inputs['targets'] = torch.Tensor(batch[-1]).to(device).long()
-
         labels_all = torch.Tensor(batch[-2]).to(device).long()
 
         n_samples = len(labels_all)
@@ -582,9 +580,11 @@ class RiiidTest(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         if self.is_local:
             random.shuffle(self.groups)
-            query = self.groups[0][0]
+            query = self.groups[0][[0]]
+            query_label = query[0, self.dcols[TARGET]]
+            query = np.delete(query, self.dcols[TARGET], axis=1)
             self.groups[0] = self.groups[0][1:]
-            if self.groups[0].shape == 0:
+            if self.groups[0].shape[0] == 0:
                 self.groups = self.groups[1:]
         else:
             query = self.queries[[idx]]
@@ -592,11 +592,11 @@ class RiiidTest(torch.utils.data.Dataset):
         query = np.delete(query, self.dcols[KEY_FEATURE], axis=1)
 
         if uid in self.data.index:
-            encoder_data = self.data[uid]
-            labels = encoder_data[:, self.dcols[TARGET]]
-            inputs = np.delete(encoder_data, [self.dcols[KEY_FEATURE],
-                                              self.dcols[TARGET]],
-                               axis=1)
+            inputs = self.data[uid]
+            labels = inputs[:, self.dcols[TARGET]]
+            inputs = np.delete(inputs, [self.dcols[KEY_FEATURE],
+                                        self.dcols[TARGET]], axis=1)
+
             inputs = np.r_[inputs, query]
         else:
             inputs = query
@@ -605,7 +605,11 @@ class RiiidTest(torch.utils.data.Dataset):
         inputs = pad_batch(inputs, self.seq_len, self.pad_value)
         targets = np.r_[START_TOKEN, labels + 1]
         targets = pad_batch(targets, self.seq_len, self.pad_value)
-
+        if self.is_local:
+            labels = np.r_[labels, query_label]
+            labels = pad_batch(labels, self.seq_len, self.pad_value)
+            uids = np.full(inputs.shape[0], uid)
+            inputs = np.c_[inputs, uids, labels]
         return np.c_[inputs, targets]
 
 
@@ -624,7 +628,6 @@ def update_stats(prev_data, prev_batch):
                 .astype(np.float32)
         else:
             prev_data[uid] = np.array([trow])
-
     np.apply_along_axis(update_stat, arr=prev_batch, axis=1)
 
 
@@ -632,10 +635,11 @@ def update_stats(prev_data, prev_batch):
 
 
 def predict_local(filepath, prev_data, is_debug, batch_size):
-    test_set = pd.read_parquet(PARQUETS_DIR + filepath,)
-                               # columns=[KEY_FEATURE] + FEATURES + [TARGET])
+    test_set = pd.read_parquet(PARQUETS_DIR + filepath,
+                               columns=[KEY_FEATURE] + FEATURES + [TARGET])
     if is_debug:
         test_set = test_set.iloc[-50_000:]
+    print('test shape:', test_set.shape)
     test_dataset = RiiidTest(prev_data, test_set,
                              SEQ_LEN, local=True)
     test_dataloader = \
@@ -648,7 +652,6 @@ def predict_local(filepath, prev_data, is_debug, batch_size):
                          local=True,
                          prev_data=prev_data,
                          device=DEVICE)
-    print('Test AUC:', roc_auc_score(test_set[TARGET], preds))
     return preds
 
 
@@ -665,7 +668,7 @@ def predict_test(estimator,
     truth = np.empty(0)
     outs = np.empty(0)
     if local:
-        tst_iterator = tqdm(tst_iterator)
+        tst_iterator = tqdm(tst_iterator, ncols=100)
     for batch in tst_iterator:
         inputs = {}
         for i, feat in enumerate(FEATURES):
@@ -677,26 +680,26 @@ def predict_test(estimator,
             elif DTYPES[feat] is bool:
                 inputs[feat] = torch.Tensor(batch[i].astype(bool)).\
                     to(device).bool()
-
         inputs['targets'] = torch.Tensor(batch[-1].astype(np.int64)).to(device).long()
 
         with torch.no_grad():
             output = estimator(inputs=inputs)
         # output = torch.sigmoid(output)
-
-        targets = inputs['targets'].data.cpu().numpy()
-        pred_col_idx = (targets != PAD_VALUE).cumsum(1).argmax(1)
-        assert (PAD_VALUE not in targets[np.arange(targets.shape[0]),
-                                         pred_col_idx])
-
         # output = output[np.arange(inputs['targets'].shape[0]), pred_col_idx]
         outs = np.r_[outs, output.data.cpu().numpy()]
 
         if local:
-            update_stats(prev_data, batch)
-            labels = batch[-2]
-            labels = labels[np.arange(inputs['targets'].shape[0]),
-                            pred_col_idx]
+            targets = inputs['targets'].data.cpu().numpy()
+            pred_col_idx = (targets != PAD_VALUE).cumsum(1).argmax(1)
+            assert (PAD_VALUE not in targets[np.arange(targets.shape[0]),
+                                             pred_col_idx])
+
+            prev_batch = batch[[-3]+list(range(len(FEATURES)))+[-2]]
+            prev_batch = prev_batch[:, np.arange(batch.shape[1]),
+                                    pred_col_idx].T
+            update_stats(prev_data, prev_batch)
+
+            labels = batch[-2, np.arange(batch.shape[1]), pred_col_idx]
             truth = np.r_[truth, labels]
             tst_iterator.set_description(
                 'test_auc - {:.4f}'.format(roc_auc_score(truth, outs)))
@@ -707,7 +710,11 @@ def predict_test(estimator,
 # %% [code]
 
 
-def predict_group(estimator, tst_batch, prev_batch, prev_data, batch_size=128):
+def predict_submission_group(estimator,
+                             tst_batch,
+                             prev_batch,
+                             prev_data,
+                             batch_size=128):
     all_cols = list(tst_batch.columns) + ADDED_FEATURES + [TARGET]
     all_cols = dict(zip(all_cols, range(len(all_cols))))
     used_cols = [all_cols[feat] for feat in [KEY_FEATURE] + FEATURES]
@@ -735,7 +742,7 @@ def predict_group(estimator, tst_batch, prev_batch, prev_data, batch_size=128):
                                                  collate_fn=collate_fn_test,
                                                  num_workers=0)
 
-    _preds = predict_test(estimator, tst_dataloader, DEVICE)
+    _preds = predict_test(estimator, tst_dataloader, device=DEVICE)
     tst_batch = np.c_[tst_batch, _preds]
     _predictions = pd.DataFrame(
         tst_batch[:, [all_cols[col] for col in SUBMISSION_COLUMNS]],
@@ -758,12 +765,14 @@ DIM_FEEDFORWARD = 512 #@param {type:"integer"}
 DROPOUT = 0.2 #@param {type:"slider", min:0, max:1, step:0.05}
 ACTIVATION = "relu" #@param ["relu", "tanh", "sigmoid"]
 LEARNING_RATE = 1e-3 #@param {type:"slider", min:1e-5, max:1, step:1e-5}
-EPOCHS = 20 #@param {type:"integer"}
+
+EPOCHS = 1000 #@param {type:"integer"}
 N_USER_BATCHES = 128 #@param {type:"integer"}
 BATCH_LIMIT = 128 #@param {type:"integer"}
-MAX_SAMPLES_PER_USER =  1#@param {type:"integer"}
+MAX_SAMPLES_PER_USER = 4 #@param {type:"integer"}
 EARLY_STOPPING = 10 #@param {type:"integer"}
-WARMUP_STEPS = 50 #@param {type:"integer"}
+WARMUP_STEPS = 20 #@param {type:"integer"}
+
 
 PAD_VALUE = 0
 START_TOKEN = 3
@@ -772,9 +781,9 @@ DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 # %% [code]
 if __name__ == '__main__':
     print('Using Device -', DEVICE)
-    retrain_transformer = 0 #@param {type:"boolean"}
+    retrain_transformer = 1 #@param {type:"boolean"}
     cont = 0 #@param {type:"boolean"}
-    debug = 1 #@param {type:"boolean"}
+    debug = 0 #@param {type:"boolean"}
     data_size = 20_000_000 #@param {type:"slider", min:1000000, max:100000000, step:1000000}
     debug_size = 5_000_000 #@param {type:"slider", min:100000, max:100000000, step:100000}
 
@@ -822,7 +831,7 @@ if __name__ == '__main__':
                                   device=DEVICE)
 
     # ============================= TESTING ===================================
-    local_sample = True #@param {type:"boolean"}
+    local_sample = 1 #@param {type:"boolean"}
 
     TAGS_DF = pd.read_parquet(PARQUETS_DIR + 'tags.parquet')
     # Add 1 to content ids to match embeddings.
@@ -855,7 +864,7 @@ if __name__ == '__main__':
             # test_batch['content_type_id'] = np.random.randint(0, 2, len(test_batch))
             # test_batch['user_id'] = 1931258865  # np.random.randint(0, previous_data.index.max() + 10000, len(test_batch))
             # test_batch['content_id'] = 10542131233  # np.random.randint(0, 20000, len(test_batch))
-            preds, previous_batch, previous_data = predict_group(
+            preds, previous_batch, previous_data = predict_submission_group(
                 model, test_batch,
                 previous_batch,
                 previous_data,
@@ -867,15 +876,19 @@ if __name__ == '__main__':
         submission['pred'] = (submission[TARGET] >= 0.5).astype(np.int8)
         submission = submission.reset_index(drop=True)
         print(submission)
+        acc = submission[submission['target'] != -1, 'target'] == \
+              submission[submission['target'] != -1, 'pred']
+        acc = sum(acc) / len(acc)
+        print('Accuracy', acc)
     else:
         print('Submitting...')
         env = riiideducation.make_env()
         previous_batch = None
         for test_batch, _ in env.iter_test():
             preds, previous_batch, previous_data = \
-                predict_group(model,
-                              test_batch,
-                              previous_batch,
-                              previous_data,
-                              batch_size=1024).values()
+                predict_submission_group(model,
+                                         test_batch,
+                                         previous_batch,
+                                         previous_data,
+                                         batch_size=1024).values()
             env.predict(preds)
