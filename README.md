@@ -1,6 +1,6 @@
 # Riiid! Answer Correctness Prediction
 
-The challenge in this Kaggle competition is to create algorithms for "Knowledge Tracing," the modeling of student knowledge over time. The goal is to accurately predict how students will perform on future interactions and whether students are able to answer their next questions correctly. The data provided is the same sorts of information a complete education app would have: that student's historic performance, the performance of other students on the same question, metadata about the question itself, and more. This is a time-series code competition. The competition can be found [here](https://www.kaggle.com/c/riiid-test-answer-prediction).
+The challenge in this Kaggle competition is to create algorithms for "Knowledge Tracing," the modeling of student knowledge over time. The goal is to accurately predict how students will perform on future interactions and whether students are able to answer their next questions correctly. The data provided is the same sorts of information a complete education app would have: that student's historic performance, the performance of other students on the same question, metadata about the question itself, and more. This is a time-series code competition. The competition and all data files can be found [here](https://www.kaggle.com/c/riiid-test-answer-prediction).
 
 
 # Data Files
